@@ -1,0 +1,546 @@
+#!/bin/bash
+#GATK package are command line tools (written in Java)
+#GATK pipelines rely on another Java package, PICARD for processing of alignment files
+
+#GATK contains multiple tools for:-
+      #NGS data processing
+      #Genotyping & variant discovery
+      #Filtering & evaluation of Germline or Somatic Variants
+
+#System Requirement:- 
+      #WSL(Ubuntu)
+      #Java 1.8
+
+#Tools Requirement:- 
+      #GATK4
+      #BWA
+      #FastQC
+      #Samtools
+      #MultiQC
+
+#Environment Dependies:-
+      #Miniconda 
+      
+#This script is to call germline variants in a human WGS paired end reads (2 X 100bp).
+#Three major steps
+      #Data pre-processing
+          #BWA tools to map the reads against Rerference genome   
+             #BWA-backtrack=ILLUMINA seq read up to 100bp
+             #BWA-SW & BWA-MEM=seq read from 70bp to 1 MBbp
+             #BWA-MEM is latest, faster, more acurate & Recommended for high quality queries
+             #Perform gapped alignment for identification of INDELs & SNPs 
+             #Effectively mapp paired end reads
+             #Perform soft-clipping(can clip ends if they do not match)
+          #SAM or BAM file Header:-
+             #@RG- Read Group (set of read that are generated from the single run of a sequencing instrument have same RG)
+             #ID:FLOWCELL.LANE1- UNIQUE ID of a collection of reads sequenced together, typically:ILLUMINA Lane (+barcode or sample) 
+             #PL:ILLUMINA- Sequencing platform
+             #LB:LIB-DAD-1- DNA prep library ID
+             #SM:DAD- Sample name
+             #PI-200- Predicted median insert size 
+          #Flag Duplicate Reads
+             #Second column in SAM file is known as bitwise flag that indicate the duplicate value
+          #Base Quality Recalibration Score
+             #To keep the high quality base and remove poor one
+             #Provide GATK Base Recalibrator with a set of known variants
+             #GATK Base Recalibrator analyzes all reads looking for mismatches between the read and reference,skipping positions included in the set of known variants
+             #GATK Base Recalibrator computes statistics on the mismatches based on the reported quality score, the position in the read and the sequenceing context
+             #Based on the statistics, an emperical quality score is assigned to each mismatch, overwriting the original reported quality score
+       
+      #Variant discovery
+          #Criteria to choose variant by HaplotypeCaller(<100 samples)  
+             #Germline or Somatic variants
+             #Diploid Organism
+             #Number of samples
+             #Pooled or Unpooled samples  
+      #Filtering & Annotation
+
+#Pipeline follows:
+             #1. Download SRA & Reference Files
+               #Unzip archive files.
+
+             #2. Index Reference File
+               #Use samtools for indexing.
+
+             #3. Create Reference Dictionary
+               #Use gatk to generate hg38 dict file.
+
+             #4. Download BQSR from GATK
+               #Known SNPs set from gatk.
+
+             #5. Convert FASTQ to QC
+               #Use fastqc for quality control check.
+
+             #6. Contaminant Removal
+               #If needed, perform with trimmomatic.
+
+             #7. Map to Reference Genome
+               #Use BWA Tool for alignment.
+
+             #8. Convert SAM to BAM
+               #Use samtools for conversion.
+
+             #9. Mark Duplicate Reads & Sort
+               #Use GATK for marking and sorting.
+
+             #10. Base Quality Score Recalibration (BQSR) for SRA
+               #Use gatk.
+
+             #11. Improve Base Quality Score
+               #Perform BQSR with gatk.
+
+             #12. Collect Alignment & Insert Size Matrix
+               #Use gatk to collect metrics.
+
+             #13. Generate Alignment Histogram
+               #Use R studio for visualization.
+
+             #14. Generate MultiQC Report
+               #Use multiqc for aggregated report.
+
+             #15. Call Variant Haplotype Caller
+               #Use gatk for variant calling.
+
+             #16. Extract SNPs & INDELs
+               #Use gatk for extraction.
+
+             #17. Filter High Quality Variants
+               #Use gatk for filtering.
+
+             #18. Select Filtered Variants
+               #Use gatk for selecting.
+
+             #19. Annotate Variant
+               #Use Funcotator by gatk for annotation.
+
+             #20. Create Tab Delimited Table
+               #Use gatk to generate a table.
+
+             #21. Functional Interpretation
+               #Perform final interpretation of results.
+
+
+
+
+ 
+#Following GATK4 best practices workflow 
+#https://gatk.broadinstitute.org/hc/en-us/articles/360835535932-Germline-short-variant-discovery-SNPs-Indels-
+#This script is for demonstration purposes only
+
+#Make 6 directory to prevent file mixup
+      #aligned_reads  
+      #data  
+      #reads  
+      #results  
+      #scripts  
+      #supporting_files
+mkdir aligned_reads data reads results scripts supporting_files
+
+
+#####################################SCRIPT##################################### 
+
+#Download data 
+#(SRA files from 1000 genome project(Paired end WGS from phase 3 individual- HG00096))
+#Give permission if using .sh file to read the script
+chmod 755 file_name.sh 
+ 
+#Read 1
+wget \
+-P /home/aman/vc/reads \
+ftp://ftp-trace.ncbi.nih.gov/1000genomes/ftp/phase3/data/HG00096/sequence_read/SRR062634_1.filt.fastq.gz
+
+#Read 2
+wget \
+-P /home/aman/vc/reads \
+ftp://ftp-trace.ncbi.nih.gov/1000genomes/ftp/phase3/data/HG00096/sequence_read/SRR062634_2.filt.fastq.gz
+ 
+echo "Run Prep files..."
+
+##################################### Prep files (TO BE GENERATED ONLY ONCE but GATK USES IT MANY TIME)#####################################
+
+if false
+then
+
+#Download reference files(hg38)
+wget \
+-P ~/home/aman/vc/supporting_files/hg38 \
+https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz 
+
+#Unzip the reference file
+gunzip \
+~/home/aman/vc/supporting_files/hg38/hg38.fa.gz
+
+##-----------------------------------------------------------------
+#To install samtools
+   #Create env & download
+conda create -n bioinfo_env -c conda-forge -c bioconda samtools
+
+   #Activate env 
+conda activate bioinfo_env
+
+   #Confirm installation
+samtools --version
+##---------------------------------------------------------------- 
+
+#Index reference FASTA file before running haplotype caller (samtools)
+
+samtools faidx \
+~/home/aman/vc/supporting_files/hg38/hg38.fa
+
+###----------------------------------------------------------------------------------------------------------------------------------
+#To install GATK
+    #Create env & download
+conda create -n gatk_env -c bioconda gatk4
+    #Activate env
+conda activate gatk_env
+    #Confirm installation
+gatk  --version​
+###----------------------------------------------------------------------------------------------------------------------------------
+
+#Create reference dictionary .dict file(Seq Name, contig length,fast access to ref metadata) before running haplotype caller (gatk)
+gatk CreateSequenceDictionary \
+R=~/home/aman/vc/supporting_files/hg38/hg38.fa \
+O=~/home/aman/vc/supporting_files/hg38/hg38.fa.dict
+ 
+#Download known sites files for BQSR from GATK resource bundle(base quality recalibration step)
+wget \
+-P ~/home/aman/vc/supporting_files/hg38/ \
+https://storage.googleapis.com/genomics-public-data/resources/broad/hg38/v0/Homo_sapiens_assembly38.dbsnp138.vcf 
+
+#Download the index file for the vcf
+wget \
+-P ~/home/aman/vc/supporting_files/hg38/ \
+https://storage.googleapis.com/genomics-public-data/resources/broad/hg38/v0/Homo_sapiens_assembly38.dbsnp138.vcf.idx
+
+fi
+
+
+
+
+
+##################################### VARIANT CALLING STEPS #####################################
+
+#Directories (for make clear code)
+ref="/home/aman/vc/supporting_files/hg38/hg38.fa"
+known_sites="/home/aman/vc/supporting_files/hg38/Homo_sapiens_assembly38.dbsnp138.vcf"
+aligned_reads= "/home/aman/vc/aligned_reads"
+reads="/home/aman/vc/reads"
+results="/home/aman/vc/results"
+data="/home/aman/vc/data" 
+
+#----------------------------------------------- 
+#To install fastqc
+    #Create env & download
+conda create -n fastqc_env fastqc -c bioconda -y
+    #Activate env
+conda activate fastqc_env
+    #Confirm installation
+fastqc --version
+#-----------------------------------------------
+
+#STEP 1: QC - Run fastqc
+echo "STEP 1: QC - Run fastqc"
+
+fastqc \
+/home/aman/vc/reads/SRR062634_1.filt.fastq.gz \
+-o /home/aman/vc/reads
+
+fastqc \
+/home/aman/vc/reads/SRR062634_2.filt.fastq.gz \
+-o /home/aman/vc/reads
+
+
+##-----------------------------------------------
+#To install Trimmomatic
+    #Create env & download
+trimmomatic_env -c bioconda trimmomatic
+    #Activate env
+conda activate trimmomatic_env
+    #Confirm installation
+trimmomatic --version
+##-----------------------------------------------
+
+#No trimming required in current read, as quality looks good.
+#But if required, follow these steps (Trimmomatic)
+  #To improve per-base sequence quality:-​
+    #For single-end library:​
+trimmomatic SE -threads 4 \​
+/home/aman/vc/reads/SRR062634_1.filt.fastq.gz \​
+trimmed_output/SRR062634_1_trimmed.fastq \​
+SLIDINGWINDOW:4:30 MINLEN:36​
+
+​    #For Pair end library:​
+trimmomatic PE -threads 4 \​
+SRR062634_1.filt.fastq.gz SRR062634_2.filt.fastq.gz \​
+trimmed_output/SRR062634_1_paired.fastq trimmed_output/SRR062634_1_unpaired.fastq \​
+trimmed_output/SRR062634_2_paired.fastq trimmed_output/SRR062634_2_unpaired.fastq \​
+SLIDINGWINDOW:4:30 MINLEN:36​
+
+#Recheck Quality after trimming:-​
+fastqc \
+trimmed_output/SRR062634_1.filt.fastq.gz_trimmed.fastq \
+-o qc_reports​
+
+###------------------------------------------------------------------
+#To install BWA-MEM
+    #Install mamba in the base environment(Faster package management)
+conda install -n base -c conda-forge mamba -y
+    #Create env & download
+mamba create -n bwa-env bwa -y
+    #Activate env
+conda activate bwa-env
+    #Confirm installation
+bwa --version
+###-----------------------------------------------------------------
+
+#STEP 2: Map to reference using BWA-MEM 
+#BWA indexes references 
+bwa index \
+/home/aman/vc/supporting_files/hg38/hg38.fa
+
+#BWA alignment 
+bwa mem -t 4 \
+-R="@RG\tID:SRR062634\tPL:ILLUMINA\tSMSRR062634" \
+/home/aman/vc/supporting_files/hg38/hg38.fa \
+/home/aman/vc/reads/ SRR062634_1.filt.fastq.gz \
+/home/aman/vc/reads/SRR062634_2.filt.fastq.gz \
+> /home/aman/vc/aligned_reads/ SRR062634.paired.sam
+
+#To view the paired reads​
+samtools view SRR062634.paired.sam | less
+
+#To view the paired read stats​
+samtools flagstat SRR062634.paired.sam​
+
+
+#Convert SAM to BAM​
+samtools view \
+-@ 4 \
+-Sb \
+/home/aman/vc/aligned_reads/SRR062634.paired.sam \​
+> /home/aman/vc/aligned_reads/SRR062634.paired.bam​
+
+#Sort BAM​
+samtools sort \
+-@ 4 \
+-o /home/aman/vc/aligned_reads/SRR062634_sorted.bam \​
+/home/aman/vc/aligned_reads/SRR062634.paired.bam​
+
+
+#STEP 3: Mark duplicate reads and sort by GATK4 (dedup=deduplicatede)
+gatk MarkDuplicatesSpark \
+-I /home/aman/vc/aligned_reads/SRR062634.paired.sam \
+-O /home/aman/vc/aligned_reads/SRR062634_sorted_dedup_reads.bam
+ 
+#To view the dedup reads stats​
+samtools flagstat SRR062634_sorted_dedup_reads.bam
+
+#STEP 4: Base quality score recalibration" (bqsr)
+
+#1. build the model
+gatk BaseRecalibrator \
+-I /home/aman/vc/aligned_reads/SRR062634_sorted_dedup_reads.bam \
+-R /home/aman/vc/supporting_files/hg38/hg38.fa \
+--known-sites /home/aman/vc/supporting_files/hg38/Homo_sapiens_assembly38.dbsnp138.vcf \
+-O /home/aman/vc/data/recal_data.table
+
+#2. Apply the nodel to adjust the base quality scores
+gatk ApplyBQSR \
+-I /home/aman/vc/aligned_reads/SRR062634_sorted_dedup_reads.bam \
+-R /home/aman/vc/supporting_files/hg38/hg38.fa \
+--bqsr-recal-file /home/aman/vc/data/recal_data.table \
+-O /home/aman/vc/aligned_reads/SRR062634_sorted_dedup_bqsr_reads.bam
+
+
+#STEP 5: Collect Alignment & Insert Size Metrics
+
+gatk CollectAlignmentSummaryMetrics \
+R=/home/aman/vc/supporting_files/hg38/hg38.fa \
+I= /home/aman/vc/aligned_reads/SRR062634_sorted_dedup_bqsr_reads.bam \
+O= /home/aman/vc/aligned_reads/alignment_metrics.txt
+
+gatk CollectInsertSizeMetrics \
+INPUT=/home/aman/vc/aligned_reads/SRR062634_sorted_dedup_bqsr_reads.bam \
+OUTPUT=/home/aman/vc/aligned_reads/insert_size_metrics.txt \
+HISTOGRAM_FILE=/home/aman/vc/aligned_reads/insert_size_histogram.pdf
+
+
+#Check multiqc report of aligned_metrics.txt and inser_metrics.txt
+multiqc \
+/vc/aligned_reads/insert_size_metrics.txt
+
+multiqc \
+/home/aman/vc/aligned_reads/alignment_metrics.txt
+
+#STEP:6 Call variant _gatk haplotype caller
+gatk HaplotypeCaller \
+-R /home/aman/vc/supporting_files/hg38/hg38.fa \
+-I /home/aman/vc/aligned_reads/SRR062634_sorted_dedup_bqsr_reads.bam \
+-O /home/aman/vc/results/raw_variantcs.vcf
+
+
+#Extract SNPs & INDELS
+
+gatk SelectVariants \
+-R /home/aman/vc/supporting_files/hg38/hg38.fa \
+-V /home/aman/vc/results/raw_variantcs.vcf \
+--select-type SNP -O /home/aman/vc/results/raw_snps.vcf
+
+gatk SelectVariants \
+-R /home/aman/vc/supporting_files/hg38/hg38.fa \
+-V /home/aman/vc/results/raw_variantcs.vcf \
+--select-type INDEL -O /home/aman/vc/results/raw_indel.vcf
+
+#STEP:7 Annotation of the Variants
+
+#Filter Hingh quality variants (Hard Filtering) site level genotype level
+ 
+#Filter for SNPs
+gatk VariantFiltration \
+  -R /home/aman/vc/supporting_files/hg38/hg38.fa \
+  -V /home/aman/vc/results/raw_snps.vcf \
+  -O /home/aman/vc/results/filtered_snps.vcf \
+  --filter-name QD_filter --filter-expression "QD < 2.0" \
+  --filter-name FS_filter --filter-expression "FS > 60.0" \
+  --filter-name MQ_filter --filter-expression "MQ < 40.0" \
+  --filter-name SOR_filter --filter-expression "SOR > 4.0" \
+  --filter-name MQRankSum_filter --filter-expression "MQRankSum < -12.5" \
+  --filter-name ReadPosRankSum_filter --filter-expression "ReadPosRankSum < -8.0" \
+  --genotype-filter-name DP_filter --genotype-filter-expression "DP < 10" \
+  --genotype-filter-name GQ_filter --genotype-filter-expression "GQ < 10"
+
+
+
+#Filter for INDELs
+gatk VariantFiltration \
+-R /home/aman/vc/supporting_files/hg38/hg38.fa \
+-V /home/aman/vc/results/raw_indel.vcf \
+-O /home/aman/vc/results/filtered_indel.vcf \
+-filter-name "QD_filter" -filter "QD<2.0" \
+-filter-name "FS_filter" -filter "FS > 200.0" \
+-filter-name "SOR_filter" -filter "SOR > 4.0" \
+-genotype-filter-expression "DP<10" \
+-genotype-filter-name "DP_filter" \
+-genotype-filter-expression "GQ<10" \
+-genotype-filter-name "GQ_filter"
+
+#Select Variants that PASS filters
+
+#For SNPs
+gatk SelectVariants \
+--exclude-filtered \
+-V /home/aman/vc/results/filtered_snps.vcf \
+-O /home/aman/vc/results/analysis-ready-snps.vcf
+
+
+#For INDELs
+gatk SelectVariants \
+--exclude-filtered \
+-V /home/aman/vc/results/filtered_indel.vcf \
+-O /home/aman/vc/results/analysis-ready-indel.vcf
+
+#If genotype filter failed grep only those variants which pass this filter too
+
+#For SNPs
+cat analysis-ready-snps.vcf| \
+grep -v -E "DP_filter|GQ_filter" | \
+less
+
+cat analysis-ready-snps.vcf| \
+grep -v -E "DP_filter|GQ_filter" \
+> analysis-ready-snps-filteredGT.vcf
+
+#For INDEls
+cat analysis-ready-indel.vcf| \
+grep -v -E "DP_filter|GQ_filter" | \
+less
+
+cat analysis-ready-indel.vcf| \
+grep -v -E "DP_filter|GQ_filter" \
+> analysis-ready-indel-filteredGT.vcf
+
+
+#Annotate Variants - gatk4 Funcotator
+#Download data source
+/home/aman/miniconda3/envs/gatk_env/bin/gatk FuncotatorDataSourceDownloader \
+  --germline \
+  --hg38 \
+  --validate-integrity \
+  --extract-after-download \
+  --output /home/aman/vc/supporting_files/hg38_new
+
+#Annotation
+#For SNPs
+
+gatk Funcotator \
+--variant /home/aman/vc/results/analysis-ready-snps-filteredGT.vcf \
+--reference /home/aman/vc/supporting_files/hg38/hg38.fa \
+--ref-version hg38 \
+--data-sources-path /home/aman/funcotator_dataSources.v1.8.hg38.20230908g \
+--output /home/aman/vc/results/analysis-ready-snps-filteredGT-functotated.vcf \
+--output-file-format VCF
+
+#For INDELs
+
+gatk Funcotator \
+--variant /home/aman/vc/results/analysis-ready-indel-filteredGT.vcf \
+--reference /home/aman/vc/supporting_files/hg38/hg38.fa \
+--ref-version hg38 \
+--data-sources-path /home/aman/funcotator_dataSources.v1.8.hg38.20230908g \
+--output /home/aman/vc/results/analysis-ready-indel-filteredGT-functotated.vcf \
+--output-file-format VCF
+
+#Extract fields from a VCF file to a tab-delimited table 
+
+#For SNPs
+gatk VariantsToTable \
+-V /home/aman/vc/results/analysis-ready-snps-filteredGT-functotated.vcf -F AC -F AN -F DP -F AF -F FUNCOTATION \
+-O /home/aman/vc/results/output_snps.table
+
+
+#For INDELs
+gatk VariantsToTable \
+-V /home/aman/vc/results/analysis-ready-indel-filteredGT-functotated.vcf -F AC -F AN -F DP -F AF -F FUNCOTATION \
+-O /home/aman/vc/results/output_indel.table
+
+
+#To make the proper table​ 
+
+#For SNPs
+#Show column name​
+cat analysis-ready-snps-filteredGT-functotated.vcf | less​
+#Extract column name​
+cat analysis-ready-snps-filteredGT-functotated.vcf | grep  " Funcotation fields are: " | less
+#To replace the pip character with the tab character​
+cat analysis-ready-snps-filteredGT-functotated.vcf | grep " Funcotation fields are: " | sed 's/|/\t/g' | less​
+#Save to a file
+cat analysis-ready-snps-filteredGT-functotated.vcf | grep " Funcotation fields are: " | sed 's/|/\t/g' > output_curated_variants_snps.txt
+#To replace the pip operator with the tab character in the Funcotation ​
+cat output_snps.table | less​
+#My gene of Interest is NBPF1​
+cat output_snps.table | cut -f 5 | grep "NBPF1" | less​
+#To replace the pip character with the tab character​
+cat output_snps.table | cut -f 5 | grep "NBPF1" |sed 's/|/\t/g' | less​
+#Append to the file the previously selected column​
+cat output_snps.table | cut -f 5 | grep "NBPF1" |sed 's/|/\t/g' >> output_curated_variants_snps.txt​
+​
+#For INDELs
+#Show column name​
+cat analysis-ready-indel-filteredGT-functotated.vcf | less​
+#Extract column name​
+cat analysis-ready-indel-filteredGT-functotated.vcf | grep  " Funcotation fields are: " | less
+#To replace the pip operator with the tab character​
+cat analysis-ready-indel-filteredGT-functotated.vcf | grep " Funcotation fields are: " | sed 's/|/\t/g' | less​
+#Save to a file
+cat analysis-ready-indel-filteredGT-functotated.vcf | grep " Funcotation fields are: " | sed 's/|/\t/g' > output_curated_variants_indel.txt
+#To replace the pip character with the tab character in the Funcotation ​
+cat output_indel.table | less​
+#My gene of Interest is NBPF1​
+cat output_indel.table | cut -f 5 | grep "NBPF1" | less​
+#To replace the pip character with the tab character​
+cat output_indel.table | cut -f 5 | grep "NBPF1" |sed 's/|/\t/g' | less​
+#Append to the file the previously selected column​
+cat output_indel.table | cut -f 5 | grep "NBPF1" |sed 's/|/\t/g' >> output_curated_variants_indel.txt​
+
+
+##################################### VARIANT CALLING STEPS #####################################
